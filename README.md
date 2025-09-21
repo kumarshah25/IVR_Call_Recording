@@ -1,1 +1,6 @@
-# IVR_Call_Recording
+# Lean IVR MVP
+
+## Run Frontend
+```bash
+cd frontend
+npm run dev
