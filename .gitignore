@@ -3,3 +3,5 @@ backend/node_modules
 dist
 uploads
 .env
+backend/data/serviceAccountKey.json
+frontend/src/firebase/config.js

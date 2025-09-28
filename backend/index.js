@@ -1,59 +1,80 @@
 /**
- * Mock Backend for Lean IVR MVP
- * - Serves CSV records
- * - Append a recipient (POST /api/recipients)
- * - Upload CSV (POST /api/upload-csv)
- * - Basic campaign endpoints
+ * Backend for Lean IVR MVP
+ * - Uses Firestore for data storage
+ * - Manages recipients and campaigns
+ * - Mock IVR and payment endpoints
  */
 
 const express = require("express");
+const cors = require("cors");
+const admin = require("firebase-admin");
+const multer = require("multer");
+const csvParser = require("csv-parser");
 const fs = require("fs");
 const path = require("path");
-const csvParser = require("csv-parser");
-const cors = require("cors");
-const multer = require("multer");
+
+// Initialize Firebase Admin SDK
+// IMPORTANT: Replace with the actual path to your service account key file
+const serviceAccount = require("./data/serviceAccountKey.json"); 
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
+const db = admin.firestore();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// file paths
-const DATA_DIR = path.join(__dirname, "data");
-const RECORDS_CSV = path.join(DATA_DIR, "records.csv");
-
-// Helper: read CSV into array of objects
-function readCsv(filePath) {
-  return new Promise((resolve, reject) => {
-    const results = [];
-    fs.createReadStream(filePath)
-      .pipe(csvParser({ skipLines: 0 }))
-      .on("data", (data) => results.push(data))
-      .on("end", () => resolve(results))
-      .on("error", (err) => reject(err));
-  });
-}
-
 // GET health
 app.get("/api/hello", (req, res) => {
-  res.json({ message: "Hello from Lean IVR mock backend 🚀" });
+  res.json({ message: "Hello from Lean IVR backend 🚀" });
 });
 
-// GET all records (parsed CSV)
-app.get("/api/records", async (req, res) => {
+// KYC endpoints
+app.get("/api/kyc", async (req, res) => {
+  const { uid } = req.query;
+  if (!uid) {
+    return res.status(400).json({ error: "User ID is required" });
+  }
   try {
-    if (!fs.existsSync(RECORDS_CSV)) {
-      return res.json([]);
+    const userDoc = await db.collection("users").doc(uid).get();
+    if (!userDoc.exists) {
+      return res.status(404).json({ error: "User not found" });
     }
-    const rows = await readCsv(RECORDS_CSV);
-    res.json(rows);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to read CSV" });
+    res.json(userDoc.data().kyc || {});
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
-// POST add a single recipient (appends to CSV)
-app.post("/api/recipients", (req, res) => {
+app.post("/api/kyc", async (req, res) => {
+  const { uid, pan, gst, bank } = req.body;
+  if (!uid || !pan || !gst || !bank) {
+    return res.status(400).json({ error: "All KYC fields are required" });
+  }
+  try {
+    await db.collection("users").doc(uid).set({ kyc: { pan, gst, bank } }, { merge: true });
+    res.json({ success: true, message: "KYC updated" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET all records
+app.get("/api/records", async (req, res) => {
+  try {
+    const recordsSnapshot = await db.collection("records").get();
+    const records = recordsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    res.json(records);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST add a single recipient
+app.post("/api/recipients", async (req, res) => {
   const body = req.body || {};
   const required = ["Name", "Mobile", "Email", "City"];
   for (const f of required) {
@@ -62,35 +83,11 @@ app.post("/api/recipients", (req, res) => {
     }
   }
 
-  // default values
-  const row = {
-    Name: body.Name,
-    Designation: body.Designation || "",
-    Organization: body.Organization || "",
-    City: body.City || "",
-    Mobile: body.Mobile,
-    Email: body.Email || "",
-    Language: body.Language || "",
-    DurationSec: body.DurationSec || "60",
-    DateTime: body.DateTime || new Date().toISOString(),
-    Status: body.Status || "Pending"
-  };
-
-  // if file doesn't exist, write header first
-  const header = Object.keys(row).join(",") + "\n";
-  const line = Object.values(row).map(v => `"${(v || "").toString().replace(/"/g, '""')}"`).join(",") + "\n";
-
   try {
-    if (!fs.existsSync(RECORDS_CSV)) {
-      fs.writeFileSync(RECORDS_CSV, header + line);
-    } else {
-      // append (no header)
-      fs.appendFileSync(RECORDS_CSV, line);
-    }
-    res.json({ success: true, row });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to append record" });
+    const docRef = await db.collection("records").add(body);
+    res.json({ success: true, id: docRef.id });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -98,51 +95,119 @@ app.post("/api/recipients", (req, res) => {
 const upload = multer({ dest: "uploads/" });
 
 // POST upload CSV (multipart/form-data)
-// field name: file
 app.post("/api/upload-csv", upload.single("file"), (req, res) => {
   if (!req.file) return res.status(400).json({ error: "No file uploaded" });
   const filePath = path.join(__dirname, req.file.path);
-  // Simple validation: ensure CSV extension
   if (!req.file.originalname.match(/\.csv$/i)) {
     fs.unlinkSync(filePath);
     return res.status(400).json({ error: "Only CSV allowed" });
   }
-  // Move/replace records.csv with uploaded file
+
+  const records = [];
+  fs.createReadStream(filePath)
+    .pipe(csvParser())
+    .on("data", (data) => records.push(data))
+    .on("end", async () => {
+      try {
+        const batch = db.batch();
+        records.forEach(record => {
+          const docRef = db.collection("records").doc();
+          batch.set(docRef, record);
+        });
+        await batch.commit();
+        fs.unlinkSync(filePath);
+        res.json({ success: true, message: "CSV data imported into Firestore" });
+      } catch (error) {
+        fs.unlinkSync(filePath);
+        res.status(500).json({ error: "Failed to import CSV to Firestore" });
+      }
+    })
+    .on("error", (err) => {
+      fs.unlinkSync(filePath);
+      res.status(500).json({ error: "Failed to process CSV file" });
+    });
+});
+
+// Campaign endpoints
+app.get("/api/campaigns", async (req, res) => {
   try {
-    fs.copyFileSync(filePath, RECORDS_CSV);
-    fs.unlinkSync(filePath);
-    res.json({ success: true, message: "CSV uploaded and saved as records.csv" });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to save uploaded CSV" });
+    const campaignsSnapshot = await db.collection("campaigns").get();
+    const campaigns = campaignsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    res.json(campaigns);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Simple campaign endpoints (mock)
-let campaigns = [
-  { id: 1, name: "Pilot Campaign", question: "How satisfied are you with service?", scheduledAt: "2025-09-30T10:00:00Z", status: "pending" }
-];
-
-app.get("/api/campaigns", (req, res) => {
-  res.json(campaigns);
-});
-
-app.post("/api/campaigns", (req, res) => {
+app.post("/api/campaigns", async (req, res) => {
   const { name, question, scheduledAt } = req.body || {};
   if (!name || !question) return res.status(400).json({ error: "name & question required" });
-  const newC = { id: campaigns.length + 1, name, question, scheduledAt: scheduledAt || new Date().toISOString(), status: "scheduled" };
-  campaigns.push(newC);
-  res.json(newC);
+  const newC = { name, question, scheduledAt: scheduledAt || new Date().toISOString(), status: "scheduled" };
+
+  try {
+    const docRef = await db.collection("campaigns").add(newC);
+    res.json({ success: true, id: docRef.id });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-// Simulate marking a recipient recording as completed (mock)
-app.post("/api/records/:name/complete", (req, res) => {
-  // This is a mock - in real system you'd update DB or S3 metadata
-  res.json({ success: true, message: `Marked ${req.params.name} as completed (mock)` });
+// Mock IVR endpoint
+app.post("/api/ivr/call", (req, res) => {
+    const { mobile } = req.body;
+    if (!mobile) {
+        return res.status(400).json({ error: "Mobile number is required" });
+    }
+    // Mocking the IVR call
+    console.log(`Initiating mock IVR call to ${mobile}`);
+    setTimeout(() => {
+        console.log(`Mock IVR call to ${mobile} completed.`);
+        // You can add more logic here to simulate call status updates
+    }, 5000);
+    res.json({ success: true, message: `Mock IVR call initiated to ${mobile}` });
 });
+
+// Billing and Invoicing endpoints
+app.get("/api/invoices", async (req, res) => {
+  const { uid } = req.query;
+  if (!uid) {
+    return res.status(400).json({ error: "User ID is required" });
+  }
+  try {
+    const invoicesSnapshot = await db.collection("invoices").where("uid", "==", uid).get();
+    const invoices = invoicesSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    res.json(invoices);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/payments/create", (req, res) => {
+  const { amount, invoiceId } = req.body;
+  // In a real app, you would use the Razorpay SDK to create an order
+  const mockOrder = {
+    id: `order_${Date.now()}`,
+    amount: amount * 100, // amount in paise
+    currency: "INR",
+  };
+  res.json(mockOrder);
+});
+
+app.post("/api/payments/verify", async (req, res) => {
+  const { paymentId, orderId, signature, invoiceId, amount } = req.body;
+  // In a real app, you would verify the signature
+  try {
+    await db.collection("invoices").doc(invoiceId).update({ status: "paid" });
+    await db.collection("payments").add({ invoiceId, amount, status: 'success', paymentId });
+    res.json({ success: true, message: "Payment successful" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 
 // Start server
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`✅ Mock backend listening on http://localhost:${PORT}`);
+  console.log(`✅ Backend listening on http://localhost:${PORT}`);
 });
