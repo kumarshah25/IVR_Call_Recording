@@ -1,5 +1,32 @@
-frontend/node_modules
-backend/node_modules
-dist
-uploads
+# Dependencies
+/node_modules
+/backend/node_modules
+/frontend/node_modules
+/backend/package-lock.json
+/frontend/package-lock.json
+
+# Lockfiles
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Build output
+/dist
+/frontend/dist
+
+# Logs
+logs
+*.log
+npm-debug.log*
+
+# User-generated content
+/backend/uploads/
+
+# Environment variables
 .env
+.env.local
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store

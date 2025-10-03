@@ -11,6 +11,8 @@ const fs = require("fs");
 const path = require("path");
 const csvParser = require("csv-parser");
 const cors = require("cors");
+const googleTTS = require('google-tts-api');
+const fetch = require('node-fetch');
 const multer = require("multer");
 
 const app = express();
@@ -94,12 +96,26 @@ app.post("/api/recipients", (req, res) => {
   }
 });
 
-// Multer setup for CSV upload
-const upload = multer({ dest: "uploads/" });
+// --- Multer Setup ---
+// Ensure upload directories exist
+const UPLOADS_DIR = path.join(__dirname, "uploads");
+const RECORDINGS_DIR = path.join(UPLOADS_DIR, "recordings");
+if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR);
+if (!fs.existsSync(RECORDINGS_DIR)) fs.mkdirSync(RECORDINGS_DIR);
+
+// Multer for CSVs
+const csvUpload = multer({ dest: path.join(UPLOADS_DIR, "csv_temp") });
+
+// Multer for audio recordings
+const audioStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, RECORDINGS_DIR),
+ filename: (req, file, cb) => cb(null, `${req.body.sessionId}-${Date.now()}.webm`),
+});
+const audioUpload = multer({ storage: audioStorage });
 
 // POST upload CSV (multipart/form-data)
 // field name: file
-app.post("/api/upload-csv", upload.single("file"), (req, res) => {
+app.post("/api/upload-csv", csvUpload.single("file"), (req, res) => {
   if (!req.file) return res.status(400).json({ error: "No file uploaded" });
   const filePath = path.join(__dirname, req.file.path);
   // Simple validation: ensure CSV extension
@@ -140,6 +156,79 @@ app.post("/api/records/:name/complete", (req, res) => {
   // This is a mock - in real system you'd update DB or S3 metadata
   res.json({ success: true, message: `Marked ${req.params.name} as completed (mock)` });
 });
+
+// Mock IVR endpoints
+
+// In-memory IVR session data (replace with a database for persistence)
+const ivrSessions = {};
+
+app.post("/ivr/start", async (req, res) => {
+  const sessionId = Math.random().toString(36).substring(2, 15); // Generate a random session ID
+  ivrSessions[sessionId] = { status: "active", currentMenu: "main" };
+
+  const ttsResponse = await textToSpeech("Welcome to Lean IVR. Press 1 for Sales, 2 for Support.");
+  res.json({ sessionId, audioUrl: ttsResponse.audioUrl, action: 'PLAY' });
+});
+
+app.post("/ivr/options", async (req, res) => {
+  const { sessionId, option } = req.body;
+
+  if (!ivrSessions[sessionId]) {
+    return res.status(400).json({ error: "Invalid session ID" });
+  }
+
+  let message = "";
+  if (option === "1") {
+    message = "Connecting you to Sales...";
+    ivrSessions[sessionId].currentMenu = "sales";
+    // Sales path does not record
+    ivrSessions[sessionId].awaitsRecording = true;
+  } else if (option === "2") {
+    // This option will now trigger a voice recording prompt
+    message = "After the beep, please state the reason for your call.";
+    ivrSessions[sessionId].currentMenu = "support";
+    // Add a flag to the session to indicate we expect a recording
+    ivrSessions[sessionId].awaitsRecording = true;
+  } else {
+    message = "Invalid option. Please try again.";
+    // Also reset here for invalid options
+    ivrSessions[sessionId].awaitsRecording = false;
+  }
+
+  const ttsResponse = await textToSpeech(message);
+  res.json({ audioUrl: ttsResponse.audioUrl, action: ivrSessions[sessionId].awaitsRecording ? 'RECORD' : 'PLAY' });
+});
+
+// New endpoint to receive audio recordings
+app.post("/ivr/record", audioUpload.single("audio"), async (req, res) => {
+  const { sessionId } = req.body;
+  if (!req.file) {
+    return res.status(400).json({ error: "No audio file received." });
+  }
+  console.log(`✅ Recording saved for session ${sessionId}: ${req.file.filename}`);
+
+  // Respond with a confirmation message
+  const ttsResponse = await textToSpeech("Thank you. Your response has been recorded. We will get back to you shortly.");
+  res.json({ audioUrl: ttsResponse.audioUrl, action: 'PLAY' });
+});
+
+// Mock Text-to-Speech API (replace with a real TTS service or library)
+async function textToSpeech(text) {
+  try {
+    // Fetch audio as base64 from google-tts-api on the server
+    const base64 = await googleTTS.getAudioBase64(text, {
+      lang: 'en',
+      slow: false,
+      timeout: 100000, // Increase timeout to 20 seconds
+    });
+    const audioUrl = `data:audio/mpeg;base64,${base64}`;
+    return { audioUrl };
+  } catch (err) {
+    console.error("TTS Error:", err);
+    // In case of an error, you might want to return a fallback audio or an error message
+    return { audioUrl: null };
+  }
+}
 
 // Start server
 const PORT = process.env.PORT || 5000;

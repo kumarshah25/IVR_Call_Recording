@@ -7,6 +7,7 @@ import MIS from "./pages/MIS";
 import Invoices from "./pages/Invoices";
 import LoginKYC from "./pages/LoginKYC";
 import Home from "./pages/Home";
+import IVR from "./pages/IVR";
 
 export default function App() {
   return (
@@ -20,6 +21,7 @@ export default function App() {
           <Route path="/mis" element={<MIS />} />
           <Route path="/invoices" element={<Invoices />} />
           <Route path="/login" element={<LoginKYC />} />
+          <Route path="/ivr" element={<IVR />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
