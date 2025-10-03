@@ -11,6 +11,7 @@ import Profile from "./pages/Profile";
 import Home from "./pages/Home";
 import ForgotPassword from "./pages/ForgotPassword";
 import { useAuth } from "./context/AuthContext";
+import IVR from "./pages/IVR";
 
 const ProtectedRoute = ({ children }) => {
   const { currentUser } = useAuth();
@@ -19,6 +20,7 @@ const ProtectedRoute = ({ children }) => {
   }
   return children;
 };
+
 
 export default function App() {
   const { currentUser } = useAuth();
@@ -37,6 +39,7 @@ export default function App() {
           <Route path="/mis" element={<ProtectedRoute><MIS /></ProtectedRoute>} />
           <Route path="/invoices" element={<ProtectedRoute><Invoices /></ProtectedRoute>} />
           <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
+          <Route path="/ivr" element={<IVR />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
